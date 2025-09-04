@@ -89,19 +89,24 @@ if 'database_loaded' not in st.session_state:
 def main():
     """Main application function"""
     
-    # Auto-load database if not already loaded
-    if not st.session_state.database_loaded:
-        auto_load_database()
-    
-    # Header
-    st.markdown('<h1 class="main-header">🔍 Value Comparison Tool</h1>', unsafe_allow_html=True)
-    st.markdown("""
-    <div style="text-align: center; margin-bottom: 2rem;">
-        <p style="font-size: 1.2rem; color: #666;">
-            Compare input values against reference database with intelligent matching
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    try:
+        # Auto-load database if not already loaded
+        if not st.session_state.database_loaded:
+            auto_load_database()
+        
+        # Header
+        st.markdown('<h1 class="main-header">🔍 Value Comparison Tool</h1>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="text-align: center; margin-bottom: 2rem;">
+            <p style="font-size: 1.2rem; color: #666;">
+                Compare input values against reference database with intelligent matching
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"❌ Error initializing app: {e}")
+        st.code(str(e))
+        return
     
     # Sidebar for navigation
     with st.sidebar:
@@ -612,6 +617,8 @@ def auto_load_database():
             
     except Exception as e:
         st.sidebar.error(f"❌ Error loading database: {e}")
+        # Don't let the error crash the app
+        st.session_state.database_loaded = False
 
 if __name__ == "__main__":
     main()
