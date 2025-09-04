@@ -81,9 +81,17 @@ if 'comparison_results' not in st.session_state:
     st.session_state.comparison_results = None
 if 'matching_engine' not in st.session_state:
     st.session_state.matching_engine = None
+if 'data_processor' not in st.session_state:
+    st.session_state.data_processor = None
+if 'database_loaded' not in st.session_state:
+    st.session_state.database_loaded = False
 
 def main():
     """Main application function"""
+    
+    # Auto-load database if not already loaded
+    if not st.session_state.database_loaded:
+        auto_load_database()
     
     # Header
     st.markdown('<h1 class="main-header">🔍 Value Comparison Tool</h1>', unsafe_allow_html=True)
@@ -126,24 +134,24 @@ def show_home_page():
     with col1:
         st.markdown("""
         <div class="metric-card">
-            <h3>📚 Database</h3>
-            <p>Load and manage your reference database with preset values</p>
+            <h3 style="color: #1f77b4;">📚 Database</h3>
+            <p style="color: #2c3e50;">Load and manage your reference database with preset values</p>
         </div>
         """, unsafe_allow_html=True)
     
     with col2:
         st.markdown("""
         <div class="metric-card">
-            <h3>🔍 Smart Matching</h3>
-            <p>Advanced algorithms for similarity detection and format normalization</p>
+            <h3 style="color: #1f77b4;">🔍 Smart Matching</h3>
+            <p style="color: #2c3e50;">Advanced algorithms for similarity detection and format normalization</p>
         </div>
         """, unsafe_allow_html=True)
     
     with col3:
         st.markdown("""
         <div class="metric-card">
-            <h3>📊 Analysis</h3>
-            <p>Detailed comparison reports with similarity scores and suggestions</p>
+            <h3 style="color: #1f77b4;">📊 Analysis</h3>
+            <p style="color: #2c3e50;">Detailed comparison reports with similarity scores and suggestions</p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -196,14 +204,19 @@ def show_data_management_page():
     if uploaded_file is not None:
         try:
             # Load the data
-            data_processor = DataProcessor()
-            preset_data = data_processor.load_preset_data(uploaded_file)
+            if st.session_state.data_processor is None:
+                st.session_state.data_processor = DataProcessor()
+            
+            preset_data = st.session_state.data_processor.load_preset_data(uploaded_file)
             
             if preset_data is not None:
-                st.session_state.preset_data = preset_data
-                st.session_state.matching_engine = MatchingEngine(preset_data)
-                
-                st.markdown('<div class="success-message">✅ Database loaded successfully!</div>', unsafe_allow_html=True)
+                # Update the database and cache
+                if st.session_state.data_processor.update_preset_data(preset_data):
+                    st.session_state.preset_data = preset_data
+                    st.session_state.matching_engine = MatchingEngine(preset_data)
+                    st.session_state.database_loaded = True
+                    
+                    st.markdown('<div class="success-message">✅ Database loaded and cached successfully!</div>', unsafe_allow_html=True)
                 
                 # Display database statistics
                 col1, col2, col3, col4 = st.columns(4)
@@ -258,6 +271,45 @@ def show_data_management_page():
                     if st.button("❌ Cancel"):
                         st.session_state.show_editor = False
                         st.rerun()
+    
+    # Cache management section
+    if st.session_state.preset_data is not None:
+        st.markdown("### Cache Management")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔄 Refresh Cache", use_container_width=True):
+                if st.session_state.data_processor:
+                    if st.session_state.data_processor.update_preset_data(st.session_state.preset_data):
+                        st.success("Cache refreshed successfully!")
+                    else:
+                        st.error("Failed to refresh cache")
+        
+        with col2:
+            if st.button("🗑️ Clear Cache", use_container_width=True):
+                if st.session_state.data_processor:
+                    try:
+                        import os
+                        if os.path.exists("preset_database.pkl"):
+                            os.remove("preset_database.pkl")
+                            st.success("Cache cleared successfully!")
+                        else:
+                            st.info("No cache file found")
+                    except Exception as e:
+                        st.error(f"Error clearing cache: {e}")
+        
+        with col3:
+            if st.button("📊 Cache Info", use_container_width=True):
+                if st.session_state.data_processor:
+                    cache_info = st.session_state.data_processor.get_cache_info()
+                    if cache_info['pkl_exists']:
+                        cache_size_mb = cache_info['pkl_size'] / (1024 * 1024)
+                        st.info(f"Cache size: {cache_size_mb:.1f} MB")
+                        if cache_info['pkl_modified']:
+                            st.info(f"Last modified: {cache_info['pkl_modified']}")
+                    else:
+                        st.info("No cache file exists")
 
 def show_comparison_page():
     """Display the value comparison page"""
@@ -532,6 +584,34 @@ def show_settings_page():
     with col2:
         st.info(f"**Database Records:** {len(st.session_state.preset_data) if st.session_state.preset_data is not None else 0:,}")
         st.info(f"**Memory Usage:** {st.session_state.get('memory_usage', 'N/A')}")
+
+def auto_load_database():
+    """Automatically load the database from PKL cache or Excel file."""
+    try:
+        # Initialize data processor
+        if st.session_state.data_processor is None:
+            st.session_state.data_processor = DataProcessor()
+        
+        # Try to load from cache or Excel
+        preset_data = st.session_state.data_processor.load_preset_data_auto()
+        
+        if preset_data is not None:
+            st.session_state.preset_data = preset_data
+            st.session_state.matching_engine = MatchingEngine(preset_data)
+            st.session_state.database_loaded = True
+            
+            # Show cache info
+            cache_info = st.session_state.data_processor.get_cache_info()
+            if cache_info['pkl_exists']:
+                cache_size_mb = cache_info['pkl_size'] / (1024 * 1024)
+                st.sidebar.success(f"📊 Database loaded from cache ({cache_size_mb:.1f} MB)")
+            else:
+                st.sidebar.info("📊 Database loaded from Excel file")
+        else:
+            st.sidebar.warning("⚠️ No database found. Please upload a database file.")
+            
+    except Exception as e:
+        st.sidebar.error(f"❌ Error loading database: {e}")
 
 if __name__ == "__main__":
     main()

@@ -75,6 +75,9 @@ class MatchingEngine:
         if 'Has_Commas' not in self.preset_data.columns:
             self.preset_data['Has_Commas'] = self.preset_data['Preset values'].apply(self._has_commas)
         
+        # Analyze formatting patterns for each composite key
+        self._analyze_formatting_patterns()
+        
         # Group by composite key for faster lookup
         for idx, row in self.preset_data.iterrows():
             composite_key = row['Composite_Key']
@@ -221,6 +224,7 @@ class MatchingEngine:
         if composite_key not in self.composite_lookup:
             return None
         
+        # Try original input first
         normalized_input = self._normalize_value(input_value)
         
         for preset_info in self.composite_lookup[composite_key]:
@@ -238,6 +242,27 @@ class MatchingEngine:
                     attribute_name=attribute_name,
                     preset_row_id=preset_info['row_id']
                 )
+        
+        # Try formatted input to match pattern
+        formatted_input = self._format_input_to_match_pattern(input_value, composite_key)
+        if formatted_input != input_value:
+            normalized_formatted = self._normalize_value(formatted_input)
+            
+            for preset_info in self.composite_lookup[composite_key]:
+                if preset_info['normalized'] == normalized_formatted:
+                    return MatchResult(
+                        input_value=input_value,
+                        matched_preset=preset_info['preset_value'],
+                        similarity_score=100.0,
+                        match_type='exact',
+                        comment=f'Exact match found (formatted from "{input_value}" to "{formatted_input}")',
+                        suggested_value=preset_info['preset_value'],
+                        status='Exact Match',
+                        category=category,
+                        sub_category=sub_category,
+                        attribute_name=attribute_name,
+                        preset_row_id=preset_info['row_id']
+                    )
         
         return None
     
@@ -515,3 +540,151 @@ class MatchingEngine:
             return False
         
         return ',' in str(value)
+    
+    def _analyze_formatting_patterns(self):
+        """Analyze formatting patterns for each composite key."""
+        self.formatting_patterns = {}
+        
+        for composite_key, group_data in self.composite_lookup.items():
+            if not group_data:
+                continue
+            
+            # Get all preset values for this key
+            preset_values = [item['preset_value'] for item in group_data]
+            
+            # Analyze patterns
+            patterns = {
+                'common_units': self._extract_common_units(preset_values),
+                'number_formats': self._extract_number_formats(preset_values),
+                'separators': self._extract_separators(preset_values),
+                'case_patterns': self._extract_case_patterns(preset_values),
+                'typical_format': self._determine_typical_format(preset_values)
+            }
+            
+            self.formatting_patterns[composite_key] = patterns
+    
+    def _extract_common_units(self, values: List[str]) -> List[str]:
+        """Extract common units from a list of values."""
+        units = set()
+        for value in values:
+            # Extract units using regex
+            unit_matches = re.findall(r'\d+\s*([a-zA-Z°]+)', str(value))
+            units.update(unit_matches)
+        return list(units)
+    
+    def _extract_number_formats(self, values: List[str]) -> Dict[str, Any]:
+        """Extract number formatting patterns."""
+        formats = {
+            'decimal_places': set(),
+            'thousand_separators': set(),
+            'number_ranges': []
+        }
+        
+        for value in values:
+            # Find numbers
+            numbers = re.findall(r'\d+\.?\d*', str(value))
+            for num in numbers:
+                if '.' in num:
+                    decimal_places = len(num.split('.')[1])
+                    formats['decimal_places'].add(decimal_places)
+        
+        formats['decimal_places'] = list(formats['decimal_places'])
+        return formats
+    
+    def _extract_separators(self, values: List[str]) -> List[str]:
+        """Extract common separators used in values."""
+        separators = set()
+        for value in values:
+            # Look for common separators
+            if ',' in str(value):
+                separators.add(',')
+            if ';' in str(value):
+                separators.add(';')
+            if '|' in str(value):
+                separators.add('|')
+            if ' - ' in str(value):
+                separators.add(' - ')
+            if ' to ' in str(value):
+                separators.add(' to ')
+        return list(separators)
+    
+    def _extract_case_patterns(self, values: List[str]) -> Dict[str, Any]:
+        """Extract case patterns from values."""
+        patterns = {
+            'all_uppercase': 0,
+            'all_lowercase': 0,
+            'title_case': 0,
+            'mixed_case': 0
+        }
+        
+        for value in values:
+            value_str = str(value)
+            if value_str.isupper():
+                patterns['all_uppercase'] += 1
+            elif value_str.islower():
+                patterns['all_lowercase'] += 1
+            elif value_str.istitle():
+                patterns['title_case'] += 1
+            else:
+                patterns['mixed_case'] += 1
+        
+        return patterns
+    
+    def _determine_typical_format(self, values: List[str]) -> str:
+        """Determine the most typical format for a set of values."""
+        if not values:
+            return "unknown"
+        
+        # Analyze the most common patterns
+        sample_values = values[:10]  # Use first 10 values for analysis
+        
+        # Check for common patterns
+        if all(re.search(r'\d+[a-zA-Z]+', str(v)) for v in sample_values):
+            return "number_unit"
+        elif all(re.search(r'[a-zA-Z]+,\s*\d+', str(v)) for v in sample_values):
+            return "text_number"
+        elif all(re.search(r'\d+', str(v)) and not re.search(r'[a-zA-Z]', str(v)) for v in sample_values):
+            return "number_only"
+        elif all(re.search(r'[a-zA-Z]', str(v)) and not re.search(r'\d', str(v)) for v in sample_values):
+            return "text_only"
+        else:
+            return "mixed"
+    
+    def _format_input_to_match_pattern(self, input_value: str, composite_key: str) -> str:
+        """Format input value to match the typical pattern for the composite key."""
+        if composite_key not in self.formatting_patterns:
+            return input_value
+        
+        patterns = self.formatting_patterns[composite_key]
+        typical_format = patterns.get('typical_format', 'unknown')
+        
+        # Extract number and unit from input
+        number_match = re.search(r'(\d+\.?\d*)', input_value)
+        unit_match = re.search(r'([a-zA-Z°]+)', input_value)
+        
+        if not number_match:
+            return input_value
+        
+        number = number_match.group(1)
+        unit = unit_match.group(1) if unit_match else ""
+        
+        # Format based on typical pattern
+        if typical_format == "number_unit":
+            # Format like "2V", "3V", etc.
+            if unit:
+                return f"{number}{unit.upper()}"
+            else:
+                return number
+        elif typical_format == "text_number":
+            # Format like "Brand, 02"
+            text_part = re.sub(r'\d+\.?\d*\s*[a-zA-Z°]*', '', input_value).strip()
+            if text_part:
+                return f"{text_part}, {number}"
+            else:
+                return number
+        elif typical_format == "number_only":
+            return number
+        elif typical_format == "text_only":
+            return input_value
+        else:
+            return input_value

@@ -8,6 +8,9 @@ import streamlit as st
 from typing import Optional, Dict, Any
 import re
 from pathlib import Path
+import pickle
+import os
+from datetime import datetime
 
 class DataProcessor:
     """Handles data loading and preprocessing operations."""
@@ -15,6 +18,8 @@ class DataProcessor:
     def __init__(self):
         self.preset_data = None
         self.input_data = None
+        self.pkl_file = "preset_database.pkl"
+        self.excel_file = "Preset 25.xlsx"
     
     @st.cache_data
     def load_preset_data(_self, uploaded_file) -> Optional[pd.DataFrame]:
@@ -248,3 +253,88 @@ class DataProcessor:
             return False
         
         return True
+    
+    def load_preset_data_from_pkl(self) -> Optional[pd.DataFrame]:
+        """Load preset data from PKL cache file."""
+        try:
+            if os.path.exists(self.pkl_file):
+                with open(self.pkl_file, 'rb') as f:
+                    data = pickle.load(f)
+                    st.success(f"✅ Database loaded from cache ({len(data):,} records)")
+                    return data
+            return None
+        except Exception as e:
+            st.warning(f"Could not load PKL cache: {e}")
+            return None
+    
+    def save_preset_data_to_pkl(self, data: pd.DataFrame) -> bool:
+        """Save preset data to PKL cache file."""
+        try:
+            with open(self.pkl_file, 'wb') as f:
+                pickle.dump(data, f)
+            return True
+        except Exception as e:
+            st.error(f"Could not save PKL cache: {e}")
+            return False
+    
+    def load_preset_data_auto(self) -> Optional[pd.DataFrame]:
+        """Automatically load preset data from PKL cache or Excel file."""
+        # Try to load from PKL cache first
+        data = self.load_preset_data_from_pkl()
+        if data is not None:
+            return data
+        
+        # If PKL doesn't exist, try to load from Excel and create PKL
+        if os.path.exists(self.excel_file):
+            try:
+                st.info("Loading database from Excel file and creating cache...")
+                data = pd.read_excel(self.excel_file)
+                data = self._clean_preset_data(data)
+                data = self._add_computed_columns(data)
+                
+                # Save to PKL for future use
+                if self.save_preset_data_to_pkl(data):
+                    st.success("✅ Database cached for faster future loading")
+                
+                return data
+            except Exception as e:
+                st.error(f"Could not load Excel file: {e}")
+                return None
+        
+        return None
+    
+    def update_preset_data(self, new_data: pd.DataFrame) -> bool:
+        """Update preset data and refresh PKL cache."""
+        try:
+            # Clean and process the new data
+            cleaned_data = self._clean_preset_data(new_data)
+            processed_data = self._add_computed_columns(cleaned_data)
+            
+            # Save to PKL cache
+            if self.save_preset_data_to_pkl(processed_data):
+                self.preset_data = processed_data
+                st.success("✅ Database updated and cached successfully")
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Could not update database: {e}")
+            return False
+    
+    def get_cache_info(self) -> Dict[str, Any]:
+        """Get information about the cache file."""
+        info = {
+            'pkl_exists': os.path.exists(self.pkl_file),
+            'excel_exists': os.path.exists(self.excel_file),
+            'pkl_size': 0,
+            'pkl_modified': None
+        }
+        
+        if info['pkl_exists']:
+            try:
+                stat = os.stat(self.pkl_file)
+                info['pkl_size'] = stat.st_size
+                info['pkl_modified'] = datetime.fromtimestamp(stat.st_mtime)
+            except:
+                pass
+        
+        return info
