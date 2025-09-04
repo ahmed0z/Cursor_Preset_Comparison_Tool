@@ -225,7 +225,7 @@ class MatchingEngine:
             return None
         
         # Try original input first
-        normalized_input = self._normalize_value(input_value)
+        normalized_input = self._smart_normalize_value(input_value, composite_key)
         
         for preset_info in self.composite_lookup[composite_key]:
             if preset_info['normalized'] == normalized_input:
@@ -246,7 +246,7 @@ class MatchingEngine:
         # Try formatted input to match pattern
         formatted_input = self._format_input_to_match_pattern(input_value, composite_key)
         if formatted_input != input_value:
-            normalized_formatted = self._normalize_value(formatted_input)
+            normalized_formatted = self._smart_normalize_value(formatted_input, composite_key)
             
             for preset_info in self.composite_lookup[composite_key]:
                 if preset_info['normalized'] == normalized_formatted:
@@ -269,7 +269,7 @@ class MatchingEngine:
     def _find_fuzzy_matches(self, input_value: str, category: str, sub_category: str,
                            attribute_name: str, similarity_threshold: float,
                            max_matches: int) -> List[MatchResult]:
-        """Find fuzzy matches within the same composite key."""
+        """Find fuzzy matches within the same composite key using smart machine learning."""
         
         matches = []
         composite_key = f"{category}|{sub_category}|{attribute_name}"
@@ -277,16 +277,14 @@ class MatchingEngine:
         if composite_key not in self.composite_lookup:
             return matches
         
-        normalized_input = self._normalize_value(input_value)
-        
         for preset_info in self.composite_lookup[composite_key]:
-            # Calculate multiple similarity scores
-            scores = self._calculate_similarity_scores(normalized_input, preset_info['normalized'])
+            # Calculate smart similarity scores based on learned patterns
+            scores = self._calculate_smart_similarity(input_value, preset_info['preset_value'], composite_key)
             max_score = max(scores.values())
             
             if max_score >= similarity_threshold:
                 match_type = max(scores, key=scores.get)
-                comment = self._generate_comment(input_value, preset_info['preset_value'], match_type)
+                comment = self._generate_smart_comment(input_value, preset_info['preset_value'], match_type, max_score, composite_key)
                 
                 matches.append(MatchResult(
                     input_value=input_value,
@@ -541,9 +539,303 @@ class MatchingEngine:
         
         return ',' in str(value)
     
+    def _extract_multipliers(self, values: List[str]) -> Dict[str, Any]:
+        """Extract multiplier patterns (m, k, n, etc.) from values."""
+        multipliers = {
+            'm': 0, 'k': 0, 'n': 0, 'u': 0, 'p': 0, 'f': 0,
+            'M': 0, 'K': 0, 'N': 0, 'U': 0, 'P': 0, 'F': 0,
+            'G': 0, 'T': 0, 'g': 0, 't': 0
+        }
+        
+        for value in values:
+            value_str = str(value)
+            # Look for multipliers in the value
+            for mult in multipliers.keys():
+                if mult in value_str:
+                    multipliers[mult] += 1
+        
+        return multipliers
+    
+    def _extract_unit_combinations(self, values: List[str]) -> List[str]:
+        """Extract common unit combinations."""
+        combinations = set()
+        
+        for value in values:
+            # Extract unit combinations like "mm", "kV", "mA", etc.
+            unit_matches = re.findall(r'\d+\.?\d*\s*([a-zA-Z°]+)', str(value))
+            for unit in unit_matches:
+                if len(unit) >= 2:  # Multi-character units
+                    combinations.add(unit)
+        
+        return list(combinations)
+    
+    def _extract_value_ranges(self, values: List[str]) -> Dict[str, Any]:
+        """Extract value ranges and patterns."""
+        ranges = {
+            'min_value': float('inf'),
+            'max_value': float('-inf'),
+            'common_values': [],
+            'decimal_places': set()
+        }
+        
+        for value in values:
+            # Extract numbers
+            numbers = re.findall(r'(\d+\.?\d*)', str(value))
+            for num_str in numbers:
+                try:
+                    num = float(num_str)
+                    ranges['min_value'] = min(ranges['min_value'], num)
+                    ranges['max_value'] = max(ranges['max_value'], num)
+                    
+                    # Track decimal places
+                    if '.' in num_str:
+                        decimal_places = len(num_str.split('.')[1])
+                        ranges['decimal_places'].add(decimal_places)
+                except:
+                    continue
+        
+        ranges['decimal_places'] = list(ranges['decimal_places'])
+        return ranges
+    
+    def _determine_case_sensitivity(self, values: List[str]) -> bool:
+        """Determine if values in this key are case sensitive."""
+        case_variations = set()
+        
+        for value in values:
+            value_str = str(value)
+            case_variations.add(value_str)
+            case_variations.add(value_str.lower())
+            case_variations.add(value_str.upper())
+        
+        # If we have different case variations, it's case sensitive
+        return len(case_variations) > len(set(str(v) for v in values))
+    
+    def _calculate_smart_similarity(self, input_value: str, preset_value: str, composite_key: str) -> Dict[str, float]:
+        """Calculate smart similarity based on learned patterns."""
+        scores = {}
+        
+        # Get patterns for this key
+        if composite_key in self.value_patterns:
+            patterns = self.value_patterns[composite_key]
+            is_case_sensitive = patterns.get('case_sensitivity', True)
+            
+            # Smart normalization based on learned patterns
+            norm_input = self._smart_normalize_value(input_value, composite_key)
+            norm_preset = self._smart_normalize_value(preset_value, composite_key)
+            
+            # Calculate base similarity
+            scores['ratio'] = fuzz.ratio(norm_input, norm_preset)
+            scores['partial_ratio'] = fuzz.partial_ratio(norm_input, norm_preset)
+            scores['token_sort_ratio'] = fuzz.token_sort_ratio(norm_input, norm_preset)
+            scores['token_set_ratio'] = fuzz.token_set_ratio(norm_input, norm_preset)
+            
+            # Enhanced pattern-based scoring
+            scores['pattern'] = self._calculate_enhanced_pattern_score(
+                input_value, preset_value, patterns
+            )
+            
+            # Multiplier and unit scoring
+            scores['multiplier_unit'] = self._calculate_multiplier_unit_score(
+                input_value, preset_value, patterns
+            )
+            
+        else:
+            # Fallback to basic scoring
+            scores = self._calculate_similarity_scores(
+                self._normalize_value(input_value), 
+                self._normalize_value(preset_value)
+            )
+        
+        return scores
+    
+    def _smart_normalize_value(self, value: str, composite_key: str) -> str:
+        """Smart normalization based on learned patterns."""
+        if pd.isna(value) or value == '':
+            return ''
+        
+        # Get patterns for this key
+        if composite_key not in self.value_patterns:
+            return self._normalize_value(value)
+        
+        patterns = self.value_patterns[composite_key]
+        is_case_sensitive = patterns.get('case_sensitivity', True)
+        
+        # Start with basic normalization
+        normalized = str(value).strip()
+        
+        # Handle case sensitivity based on learned patterns
+        if not is_case_sensitive:
+            normalized = normalized.lower()
+        
+        # Handle multipliers and units based on learned patterns
+        normalized = self._normalize_multipliers_and_units(normalized, patterns)
+        
+        # Remove extra whitespace
+        normalized = re.sub(r'\s+', ' ', normalized)
+        
+        return normalized
+    
+    def _normalize_multipliers_and_units(self, value: str, patterns: Dict[str, Any]) -> str:
+        """Normalize multipliers and units based on learned patterns."""
+        # Handle common multiplier patterns
+        multiplier_map = {
+            'm': 'm', 'k': 'k', 'n': 'n', 'u': 'u', 'p': 'p', 'f': 'f',
+            'M': 'M', 'K': 'K', 'N': 'N', 'U': 'U', 'P': 'P', 'F': 'F',
+            'G': 'G', 'T': 'T', 'g': 'g', 't': 't'
+        }
+        
+        # Extract and normalize multipliers
+        for mult, normalized_mult in multiplier_map.items():
+            # Pattern: number + multiplier + unit (e.g., "1kΩ", "2mV")
+            pattern = rf'(\d+\.?\d*)\s*{mult}\s*([a-zA-Z°]+)'
+            value = re.sub(pattern, rf'\1{normalized_mult}\2', value)
+            
+            # Pattern: number + multiplier (e.g., "1k", "2m")
+            pattern = rf'(\d+\.?\d*)\s*{mult}(?![a-zA-Z°])'
+            value = re.sub(pattern, rf'\1{normalized_mult}', value)
+        
+        return value
+    
+    def _calculate_enhanced_pattern_score(self, input_value: str, preset_value: str, patterns: Dict[str, Any]) -> float:
+        """Calculate enhanced pattern-based similarity score."""
+        score = 0
+        
+        # Case sensitivity bonus
+        if patterns.get('case_sensitivity', True):
+            if input_value == preset_value:
+                score += 30
+        else:
+            if input_value.lower() == preset_value.lower():
+                score += 30
+        
+        # Unit pattern matching
+        input_units = re.findall(r'([a-zA-Z°]+)', input_value)
+        preset_units = re.findall(r'([a-zA-Z°]+)', preset_value)
+        
+        if set(input_units) == set(preset_units):
+            score += 25
+        
+        # Multiplier pattern matching
+        input_multipliers = re.findall(r'(\d+\.?\d*)\s*([mknupfMKNUPFGTgt])', input_value)
+        preset_multipliers = re.findall(r'(\d+\.?\d*)\s*([mknupfMKNUPFGTgt])', preset_value)
+        
+        if len(input_multipliers) == len(preset_multipliers):
+            score += 20
+        
+        # Number format matching
+        input_numbers = re.findall(r'(\d+\.?\d*)', input_value)
+        preset_numbers = re.findall(r'(\d+\.?\d*)', preset_value)
+        
+        if len(input_numbers) == len(preset_numbers):
+            score += 15
+        
+        return min(score, 100)
+    
+    def _calculate_multiplier_unit_score(self, input_value: str, preset_value: str, patterns: Dict[str, Any]) -> float:
+        """Calculate similarity based on multipliers and units."""
+        score = 0
+        
+        # Extract multipliers and units
+        input_parts = self._extract_value_parts(input_value)
+        preset_parts = self._extract_value_parts(preset_value)
+        
+        # Compare multipliers
+        if input_parts['multipliers'] == preset_parts['multipliers']:
+            score += 40
+        
+        # Compare units
+        if input_parts['units'] == preset_parts['units']:
+            score += 30
+        
+        # Compare numbers (with tolerance for unit conversion)
+        if self._numbers_are_equivalent(input_parts['numbers'], preset_parts['numbers']):
+            score += 30
+        
+        return min(score, 100)
+    
+    def _extract_value_parts(self, value: str) -> Dict[str, Any]:
+        """Extract different parts of a value (numbers, multipliers, units)."""
+        parts = {
+            'numbers': [],
+            'multipliers': [],
+            'units': []
+        }
+        
+        # Extract numbers with multipliers
+        number_mult_pattern = r'(\d+\.?\d*)\s*([mknupfMKNUPFGTgt]?)\s*([a-zA-Z°]*)'
+        matches = re.findall(number_mult_pattern, value)
+        
+        for number, multiplier, unit in matches:
+            parts['numbers'].append(float(number))
+            parts['multipliers'].append(multiplier)
+            parts['units'].append(unit)
+        
+        return parts
+    
+    def _numbers_are_equivalent(self, nums1: List[float], nums2: List[float]) -> bool:
+        """Check if two number lists are equivalent (allowing for small differences)."""
+        if len(nums1) != len(nums2):
+            return False
+        
+        for n1, n2 in zip(nums1, nums2):
+            if abs(n1 - n2) > 0.001:  # Small tolerance
+                return False
+        
+        return True
+    
+    def _generate_smart_comment(self, input_value: str, preset_value: str, match_type: str, similarity_score: float, composite_key: str) -> str:
+        """Generate smart comment with similarity percentage and pattern analysis."""
+        comment_parts = []
+        
+        # Add similarity percentage
+        comment_parts.append(f"similar {similarity_score:.0f}%")
+        
+        # Add pattern-specific analysis
+        if composite_key in self.value_patterns:
+            patterns = self.value_patterns[composite_key]
+            
+            # Case sensitivity analysis
+            if patterns.get('case_sensitivity', True):
+                if input_value != preset_value and input_value.lower() == preset_value.lower():
+                    comment_parts.append("case difference")
+            else:
+                if input_value.lower() == preset_value.lower():
+                    comment_parts.append("case normalized")
+            
+            # Multiplier analysis
+            input_multipliers = re.findall(r'([mknupfMKNUPFGTgt])', input_value)
+            preset_multipliers = re.findall(r'([mknupfMKNUPFGTgt])', preset_value)
+            
+            if input_multipliers != preset_multipliers:
+                comment_parts.append("multiplier difference")
+            
+            # Unit analysis
+            input_units = re.findall(r'([a-zA-Z°]+)', input_value)
+            preset_units = re.findall(r'([a-zA-Z°]+)', preset_value)
+            
+            if set(input_units) != set(preset_units):
+                comment_parts.append("unit difference")
+        
+        # Add match type
+        if match_type == 'ratio':
+            comment_parts.append("overall similarity")
+        elif match_type == 'partial_ratio':
+            comment_parts.append("partial match")
+        elif match_type == 'token_sort_ratio':
+            comment_parts.append("reordered words")
+        elif match_type == 'pattern':
+            comment_parts.append("pattern match")
+        elif match_type == 'multiplier_unit':
+            comment_parts.append("multiplier/unit match")
+        
+        return " | ".join(comment_parts)
+    
     def _analyze_formatting_patterns(self):
-        """Analyze formatting patterns for each composite key."""
+        """Analyze formatting patterns for each composite key - Train the machine."""
         self.formatting_patterns = {}
+        self.unit_multipliers = {}
+        self.case_sensitivity = {}
+        self.value_patterns = {}
         
         for composite_key, group_data in self.composite_lookup.items():
             if not group_data:
@@ -552,16 +844,25 @@ class MatchingEngine:
             # Get all preset values for this key
             preset_values = [item['preset_value'] for item in group_data]
             
-            # Analyze patterns
+            # Train the machine on this key's patterns
             patterns = {
                 'common_units': self._extract_common_units(preset_values),
                 'number_formats': self._extract_number_formats(preset_values),
                 'separators': self._extract_separators(preset_values),
                 'case_patterns': self._extract_case_patterns(preset_values),
-                'typical_format': self._determine_typical_format(preset_values)
+                'typical_format': self._determine_typical_format(preset_values),
+                'multipliers': self._extract_multipliers(preset_values),
+                'unit_combinations': self._extract_unit_combinations(preset_values),
+                'value_ranges': self._extract_value_ranges(preset_values),
+                'case_sensitivity': self._determine_case_sensitivity(preset_values)
             }
             
             self.formatting_patterns[composite_key] = patterns
+            
+            # Store specific patterns for this key
+            self.unit_multipliers[composite_key] = patterns['multipliers']
+            self.case_sensitivity[composite_key] = patterns['case_sensitivity']
+            self.value_patterns[composite_key] = patterns
     
     def _extract_common_units(self, values: List[str]) -> List[str]:
         """Extract common units from a list of values."""
